@@ -27,7 +27,6 @@ def fix_image_orientation(image: PILImage.Image) -> PILImage.Image:
             return image
 
         orientation = exif[orientation_key]
-        print(f"[DEBUG] Orientation 값: {orientation}")
 
         if orientation == 2:
             image = image.transpose(PILImage.FLIP_LEFT_RIGHT)
@@ -58,7 +57,6 @@ def save_encrypted_image(file_bytes: bytes, password: str, prefix: str = "img") 
 
     # 2. EXIF 회전 보정
     image = fix_image_orientation(image)
-    print(f"[DEBUG] 보정 후 이미지 크기: {image.size}")
 
     # 3. EXIF 완전 제거 후 새 이미지로 저장 (브라우저가 EXIF 재참조 못하게)
     output = BytesIO()
