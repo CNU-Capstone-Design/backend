@@ -1,6 +1,7 @@
 import os
 import uuid
 import base64
+import threading
 import requests
 from flask import Blueprint, request, jsonify, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
@@ -57,6 +58,28 @@ def upload_image():
     )
     db.session.add(img_record)
     db.session.commit()
+
+    # 인퍼런스 서버에 test-time optimization 비동기 요청 (응답 안 기다림)
+    if _INFER_URL:
+        def _fire_optimize(raw: bytes):
+            try:
+                headers = {"Content-Type": "application/json"}
+                if _INFER_KEY:
+                    headers["X-API-Key"] = _INFER_KEY
+                requests.post(
+                    f"{_INFER_URL}/optimize",
+                    json={"image": base64.b64encode(raw).decode(), "n_steps": 50},
+                    headers=headers,
+                    timeout=5,
+                )
+            except Exception:
+                pass  # 인퍼런스 서버 꺼져 있어도 업로드는 정상 완료
+
+        threading.Thread(
+            target=_fire_optimize,
+            args=(file_bytes,),
+            daemon=True,
+        ).start()
 
     return jsonify({
         "image_id": image_id,
