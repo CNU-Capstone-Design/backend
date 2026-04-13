@@ -99,6 +99,85 @@ def run_inference(image_id: str, target_parts: list, style_intensity: float) -> 
     }
 
 
+@simulate_bp.route("/preview", methods=["POST"])
+@jwt_required()
+def preview():
+    """
+    실시간 프리뷰용 feature swap. DB 저장 없이 결과 이미지만 반환합니다.
+
+    Request JSON:
+      image_id      (str)  — 베이스 이미지 ID
+      region_donors (dict) — {region_name: {image: base64, intensity: 0~1}}
+                             최대 3개 region
+
+    Response JSON:
+      result           (str)   — 결과 이미지 base64 (JPEG)
+      similarity_score (float|null)
+    """
+    user_id = int(get_jwt_identity())
+    data    = request.get_json(silent=True) or {}
+
+    image_id      = data.get("image_id")
+    region_donors = data.get("region_donors", {})
+
+    if not image_id:
+        return jsonify({"error": "image_id는 필수입니다."}), 400
+    if not region_donors:
+        return jsonify({"error": "region_donors 가 비어있습니다."}), 400
+    if len(region_donors) > 3:
+        return jsonify({"error": "최대 3개의 region 만 동시에 swap 할 수 있습니다."}), 400
+
+    if not _INFER_URL:
+        return jsonify({"error": "인퍼런스 서버가 설정되지 않았습니다."}), 503
+
+    img_record = Image.query.filter_by(id=image_id, user_id=user_id).first()
+    if not img_record:
+        return jsonify({"error": "이미지를 찾을 수 없습니다."}), 404
+
+    # 베이스 이미지 복호화
+    try:
+        raw_bytes = load_decrypted_image(
+            img_record.filename,
+            img_record.iv,
+            img_record.kdf_salt,
+            img_record.encryption_password,
+        )
+    except Exception:
+        return jsonify({"error": "베이스 이미지 복호화에 실패했습니다."}), 500
+
+    payload = {
+        "base_image":    base64.b64encode(raw_bytes).decode(),
+        "region_donors": region_donors,
+    }
+    headers = {"Content-Type": "application/json"}
+    if _INFER_KEY:
+        headers["X-API-Key"] = _INFER_KEY
+
+    try:
+        resp = requests.post(
+            f"{_INFER_URL}/infer/preview",
+            json=payload,
+            headers=headers,
+            timeout=_INFER_TIMEOUT,
+        )
+        resp.raise_for_status()
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "인퍼런스 서버에 연결할 수 없습니다."}), 503
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "인퍼런스 서버 응답 시간이 초과됐습니다."}), 504
+    except requests.exceptions.HTTPError as e:
+        return jsonify({"error": f"인퍼런스 서버 오류: {e}"}), 502
+
+    result_data = resp.json()
+    if "error" in result_data:
+        return jsonify({"error": result_data["error"]}), 500
+
+    return jsonify({
+        "result":           result_data.get("result"),
+        "similarity_score": result_data.get("similarity_score"),
+    }), 200
+
+
 @simulate_bp.route("/infer", methods=["POST"])
 @jwt_required()
 def infer():
