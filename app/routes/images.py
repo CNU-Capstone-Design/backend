@@ -1,11 +1,17 @@
+import os
 import uuid
 import base64
+import requests
 from flask import Blueprint, request, jsonify, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from io import BytesIO
 from app import db
 from app.models.simulation import Image
 from app.utils.image import allowed_file, save_encrypted_image, load_decrypted_image, delete_encrypted_file
+
+_INFER_URL     = os.getenv("INFERENCE_SERVER_URL", "").rstrip("/")
+_INFER_KEY     = os.getenv("INFERENCE_API_KEY", "")
+_INFER_TIMEOUT = int(os.getenv("INFERENCE_TIMEOUT_SEC", 120))
 
 images_bp = Blueprint("images", __name__)
 
@@ -99,6 +105,52 @@ def get_image_base64(image_id):
 
     encoded = base64.b64encode(image_bytes).decode("utf-8")
     return jsonify({"image_id": image_id, "data_url": f"data:image/jpeg;base64,{encoded}"}), 200
+
+
+@images_bp.route("/<image_id>/segment", methods=["GET"])
+@jwt_required()
+def segment_image(image_id):
+    """
+    BiSeNet 세그멘테이션 마스크 반환.
+    인퍼런스 서버가 켜져 있을 때만 동작합니다.
+    """
+    user_id = int(get_jwt_identity())
+    img = Image.query.filter_by(id=image_id, user_id=user_id).first()
+    if not img:
+        return jsonify({"error": "이미지를 찾을 수 없습니다."}), 404
+
+    if not _INFER_URL:
+        return jsonify({"error": "인퍼런스 서버가 설정되지 않았습니다."}), 503
+
+    try:
+        image_bytes = load_decrypted_image(img.filename, img.iv, img.kdf_salt, img.encryption_password)
+    except Exception:
+        return jsonify({"error": "이미지 복호화에 실패했습니다."}), 500
+
+    headers = {"Content-Type": "application/json"}
+    if _INFER_KEY:
+        headers["X-API-Key"] = _INFER_KEY
+
+    try:
+        resp = requests.post(
+            f"{_INFER_URL}/segment",
+            json={"image": base64.b64encode(image_bytes).decode()},
+            headers=headers,
+            timeout=_INFER_TIMEOUT,
+        )
+        resp.raise_for_status()
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "인퍼런스 서버에 연결할 수 없습니다. 홈 서버가 켜져 있는지 확인하세요."}), 503
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "인퍼런스 서버 응답 시간이 초과됐습니다."}), 504
+    except requests.exceptions.HTTPError as e:
+        return jsonify({"error": f"인퍼런스 서버 오류: {e}"}), 502
+
+    data = resp.json()
+    if "error" in data:
+        return jsonify({"error": data["error"]}), 500
+
+    return jsonify({"masks": data["masks"]}), 200
 
 
 @images_bp.route("/<image_id>", methods=["DELETE"])
