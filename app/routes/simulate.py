@@ -1,31 +1,101 @@
 """
 AI 시뮬레이션 라우트.
-현재는 AI 모델(BiSeNet/SEAN) 없이 stub 응답을 반환합니다.
-모델 연동 시 run_inference() 함수만 교체하면 됩니다.
+run_inference() 가 로컬 인퍼런스 서버(HierInvRegionModel)를 HTTP 로 호출합니다.
+
+인퍼런스 서버 URL: 환경변수 INFERENCE_SERVER_URL (예: https://xxxx.ngrok.io)
+인증 키:          환경변수 INFERENCE_API_KEY
 """
 
+import os
 import uuid
 import json
-from flask import Blueprint, request, jsonify
+import base64
+import requests
+from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db
 from app.models.simulation import Simulation, Image
+from app.utils.image import save_encrypted_image, load_decrypted_image
 
 simulate_bp = Blueprint("simulate", __name__)
+
+# ── 인퍼런스 서버 설정 ────────────────────────────────────
+_INFER_URL = os.getenv("INFERENCE_SERVER_URL", "").rstrip("/")
+_INFER_KEY = os.getenv("INFERENCE_API_KEY", "")
+_INFER_TIMEOUT = int(os.getenv("INFERENCE_TIMEOUT_SEC", 120))
 
 
 def run_inference(image_id: str, target_parts: list, style_intensity: float) -> dict:
     """
-    AI 추론 stub.
-    실제 BiSeNet + SEAN 모델 연동 시 이 함수를 교체합니다.
-    Returns dict with keys: result_filename, result_iv, fid_score, similarity_score
+    로컬 인퍼런스 서버(HierInvRegionModel)를 호출해 얼굴 시뮬레이션을 실행합니다.
+
+    흐름:
+      1. DB 에서 Image 레코드 조회 → 복호화
+      2. base64 로 인코딩해 인퍼런스 서버 POST /infer 호출
+      3. 결과 이미지를 AES-256 으로 재암호화 후 저장
+      4. filename / iv / kdf_salt / 점수 반환
+
+    Returns:
+        result_filename, result_iv, result_kdf_salt, fid_score, similarity_score
     """
-    # TODO: BiSeNet 파싱 → SEAN 추론 → 결과 이미지 AES 암호화 저장
+    if not _INFER_URL:
+        raise RuntimeError(
+            "INFERENCE_SERVER_URL 이 설정되지 않았습니다. "
+            "백엔드 .env 에 로컬 인퍼런스 서버 URL(ngrok 등)을 입력하세요."
+        )
+
+    # 1. 원본 이미지 복호화
+    img_record: Image = Image.query.filter_by(id=image_id).first()
+    if not img_record:
+        raise ValueError(f"image_id={image_id} 를 찾을 수 없습니다.")
+
+    raw_bytes = load_decrypted_image(
+        img_record.filename,
+        img_record.iv,
+        img_record.kdf_salt,
+        img_record.encryption_password,
+    )
+
+    # 2. 인퍼런스 서버 호출
+    payload = {
+        "image":           base64.b64encode(raw_bytes).decode(),
+        "target_parts":    target_parts,
+        "style_intensity": style_intensity,
+    }
+    headers = {"Content-Type": "application/json"}
+    if _INFER_KEY:
+        headers["X-API-Key"] = _INFER_KEY
+
+    resp = requests.post(
+        f"{_INFER_URL}/infer",
+        json=payload,
+        headers=headers,
+        timeout=_INFER_TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    if "error" in data:
+        raise RuntimeError(f"인퍼런스 서버 오류: {data['error']}")
+
+    result_b64 = data.get("result")
+    if not result_b64:
+        raise RuntimeError("인퍼런스 서버에서 결과 이미지를 받지 못했습니다.")
+
+    # 3. 결과 이미지 AES-256 암호화 후 저장
+    result_bytes = base64.b64decode(result_b64)
+    result_filename, result_iv, result_salt = save_encrypted_image(
+        result_bytes,
+        img_record.encryption_password,
+        prefix="result",
+    )
+
     return {
-        "result_filename": None,
-        "result_iv": None,
-        "fid_score": None,
-        "similarity_score": None,
+        "result_filename":  result_filename,
+        "result_iv":        result_iv,
+        "result_kdf_salt":  result_salt,
+        "fid_score":        data.get("fid_score"),
+        "similarity_score": data.get("similarity_score"),
     }
 
 
@@ -60,12 +130,13 @@ def infer():
     db.session.add(simulation)
     db.session.commit()
 
-    # Run inference (stub for now)
+    # Run inference
     try:
         result = run_inference(image_id, target_parts, style_intensity)
-        simulation.result_filename = result["result_filename"]
-        simulation.result_iv = result["result_iv"]
-        simulation.fid_score = result["fid_score"]
+        simulation.result_filename  = result["result_filename"]
+        simulation.result_iv        = result["result_iv"]
+        simulation.result_kdf_salt  = result["result_kdf_salt"]
+        simulation.fid_score        = result["fid_score"]
         simulation.similarity_score = result["similarity_score"]
         simulation.status = "completed"
     except Exception as e:
@@ -122,8 +193,18 @@ def get_result_image(task_id):
     if not sim or sim.status != "completed" or not sim.result_filename:
         return jsonify({"error": "결과 이미지가 없습니다."}), 404
 
+    # 결과 이미지를 복호화하려면 원본 Image 레코드의 암호화 비밀번호가 필요합니다.
+    src_img = Image.query.filter_by(id=sim.image_id).first()
+    if not src_img:
+        return jsonify({"error": "원본 이미지 레코드를 찾을 수 없습니다."}), 404
+
     try:
-        image_bytes = load_decrypted_image(sim.result_filename, sim.result_iv)
+        image_bytes = load_decrypted_image(
+            sim.result_filename,
+            sim.result_iv,
+            sim.result_kdf_salt,
+            src_img.encryption_password,
+        )
     except Exception:
         return jsonify({"error": "결과 이미지 복호화에 실패했습니다."}), 500
 
