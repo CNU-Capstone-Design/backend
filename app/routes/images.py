@@ -60,7 +60,13 @@ def upload_image():
     db.session.commit()
 
     # 인퍼런스 서버에 test-time optimization 비동기 요청 (응답 안 기다림)
+    # preview 때와 동일한 이미지(EXIF 보정본)로 해시를 맞춰야 캐시가 hit 됨
     if _INFER_URL:
+        try:
+            corrected_bytes = load_decrypted_image(filename, iv, salt, encryption_password)
+        except Exception:
+            corrected_bytes = file_bytes  # 복호화 실패 시 원본으로 fallback
+
         def _fire_optimize(raw: bytes):
             try:
                 headers = {"Content-Type": "application/json"}
@@ -77,7 +83,7 @@ def upload_image():
 
         threading.Thread(
             target=_fire_optimize,
-            args=(file_bytes,),
+            args=(corrected_bytes,),
             daemon=True,
         ).start()
 
