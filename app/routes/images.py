@@ -150,10 +150,7 @@ def segment_image(image_id):
     if "error" in data:
         return jsonify({"error": data["error"]}), 500
 
-    return jsonify({
-        "masks":         data["masks"],
-        "aligned_image": data.get("aligned_image"),   # FFHQ aligned base64
-    }), 200
+    return jsonify({"masks": data["masks"]}), 200
 
 
 @images_bp.route("/<image_id>", methods=["DELETE"])
