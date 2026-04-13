@@ -74,7 +74,7 @@ def upload_image():
                     headers["X-API-Key"] = _INFER_KEY
                 requests.post(
                     f"{_INFER_URL}/optimize",
-                    json={"image": base64.b64encode(raw).decode(), "n_steps": 50},
+                    json={"image": base64.b64encode(raw).decode(), "n_steps": 200},
                     headers=headers,
                     timeout=5,
                 )
