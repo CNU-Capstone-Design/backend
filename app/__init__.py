@@ -29,7 +29,8 @@ def create_app():
     # Extensions
     db.init_app(app)
     jwt.init_app(app)
-    CORS(app, resources={r"/api/*": {"origins": "*"}})
+    cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+    CORS(app, resources={r"/api/*": {"origins": cors_origins}})
 
     # Ensure upload directory exists
     os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
