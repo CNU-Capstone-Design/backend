@@ -2,7 +2,7 @@
 AI 시뮬레이션 라우트.
 run_inference() 가 로컬 인퍼런스 서버(HierInvRegionModel)를 HTTP 로 호출합니다.
 
-인퍼런스 서버 URL: 환경변수 INFERENCE_SERVER_URL (예: https://xxxx.ngrok.io)
+인퍼런스 서버 URL: 환경변수 INFERENCE_SERVER_URL (예: http://100.118.230.17:7860)
 인증 키:          환경변수 INFERENCE_API_KEY
 """
 
@@ -41,7 +41,7 @@ def run_inference(image_id: str, target_parts: list, style_intensity: float) -> 
     if not _INFER_URL:
         raise RuntimeError(
             "INFERENCE_SERVER_URL 이 설정되지 않았습니다. "
-            "백엔드 .env 에 로컬 인퍼런스 서버 URL(ngrok 등)을 입력하세요."
+            "백엔드 .env 에 로컬 인퍼런스 서버 URL(Tailscale IP 등)을 입력하세요."
         )
 
     # 1. 원본 이미지 복호화
