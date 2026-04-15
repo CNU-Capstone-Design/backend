@@ -59,36 +59,85 @@ def upload_image():
     db.session.add(img_record)
     db.session.commit()
 
-    # 인퍼런스 서버에 test-time optimization 비동기 요청 (응답 안 기다림)
-    # preview 때와 동일한 이미지(EXIF 보정본)로 해시를 맞춰야 캐시가 hit 됨
-    if _INFER_URL:
+    # EXIF 보정된 바이트 — optimize/preprocess 해시 일치를 위해
+    try:
+        corrected_bytes = load_decrypted_image(filename, iv, salt, encryption_password)
+    except Exception:
+        corrected_bytes = file_bytes
+
+    if not _INFER_URL:
+        # 업로드한 파일 정리
+        delete_encrypted_file(filename)
+        db.session.delete(img_record)
+        db.session.commit()
+        return jsonify({"error": "인퍼런스 서버가 설정되지 않았습니다. 관리자에게 문의하세요."}), 503
+
+    infer_headers = {"Content-Type": "application/json"}
+    if _INFER_KEY:
+        infer_headers["X-API-Key"] = _INFER_KEY
+
+    # ① FFHQ alignment — 필수 단계 (실패 시 업로드 자체를 거부)
+    try:
+        prep_resp = requests.post(
+            f"{_INFER_URL}/preprocess",
+            json={"image": base64.b64encode(corrected_bytes).decode()},
+            headers=infer_headers,
+            timeout=15,
+        )
+        prep_resp.raise_for_status()
+        aligned_b64 = prep_resp.json().get("aligned")
+        if not aligned_b64:
+            raise RuntimeError("aligned 필드 없음")
+    except requests.exceptions.ConnectionError:
+        delete_encrypted_file(filename)
+        db.session.delete(img_record)
+        db.session.commit()
+        return jsonify({"error": "AI 서버에 연결할 수 없습니다. 홈 서버가 켜져 있는지 확인하세요."}), 503
+    except requests.exceptions.Timeout:
+        delete_encrypted_file(filename)
+        db.session.delete(img_record)
+        db.session.commit()
+        return jsonify({"error": "AI 서버 응답 시간이 초과됐습니다. 잠시 후 다시 시도하세요."}), 504
+    except Exception as e:
+        delete_encrypted_file(filename)
+        db.session.delete(img_record)
+        db.session.commit()
+        return jsonify({"error": f"이미지 전처리에 실패했습니다: {e}"}), 502
+
+    # aligned 이미지 저장
+    aligned_bytes = base64.b64decode(aligned_b64)
+    al_filename, al_iv, al_salt = save_encrypted_image(
+        aligned_bytes, encryption_password, prefix="aligned"
+    )
+    aligned_record = Image(
+        id=str(uuid.uuid4()),
+        user_id=user_id,
+        filename=al_filename,
+        iv=al_iv,
+        kdf_salt=al_salt,
+        encryption_password=encryption_password,
+    )
+    db.session.add(aligned_record)
+    db.session.commit()
+    aligned_image_id = aligned_record.id
+
+    # ② test-time optimization 비동기 요청 (응답 안 기다림)
+    def _fire_optimize(raw: bytes):
         try:
-            corrected_bytes = load_decrypted_image(filename, iv, salt, encryption_password)
+            requests.post(
+                f"{_INFER_URL}/optimize",
+                json={"image": base64.b64encode(raw).decode(), "n_steps": 100},
+                headers=infer_headers,
+                timeout=5,
+            )
         except Exception:
-            corrected_bytes = file_bytes  # 복호화 실패 시 원본으로 fallback
+            pass
 
-        def _fire_optimize(raw: bytes):
-            try:
-                headers = {"Content-Type": "application/json"}
-                if _INFER_KEY:
-                    headers["X-API-Key"] = _INFER_KEY
-                requests.post(
-                    f"{_INFER_URL}/optimize",
-                    json={"image": base64.b64encode(raw).decode(), "n_steps": 100},
-                    headers=headers,
-                    timeout=5,
-                )
-            except Exception:
-                pass  # 인퍼런스 서버 꺼져 있어도 업로드는 정상 완료
-
-        threading.Thread(
-            target=_fire_optimize,
-            args=(corrected_bytes,),
-            daemon=True,
-        ).start()
+    threading.Thread(target=_fire_optimize, args=(corrected_bytes,), daemon=True).start()
 
     return jsonify({
         "image_id": image_id,
+        "aligned_image_id": aligned_image_id,
         "detected_parts": DETECTED_PARTS,
         "created_at": img_record.created_at.isoformat(),
     }), 200

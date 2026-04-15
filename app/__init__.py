@@ -46,8 +46,25 @@ def create_app():
     app.register_blueprint(simulate_bp, url_prefix="/api/v1/simulate")
     app.register_blueprint(gallery_bp, url_prefix="/api/v1/gallery")
 
-    # Create tables
+    # Create tables + 컬럼 추가 마이그레이션 (SQLite)
     with app.app_context():
         db.create_all()
+        _migrate_db()
 
     return app
+
+
+def _migrate_db():
+    """기존 DB에 새 컬럼이 없으면 추가합니다 (SQLite ALTER TABLE)."""
+    from sqlalchemy import text
+    migrations = [
+        "ALTER TABLE simulations ADD COLUMN aligned_image_id VARCHAR(36)",
+        "ALTER TABLE simulations ADD COLUMN result_thumbnail TEXT",
+    ]
+    with db.engine.connect() as conn:
+        for sql in migrations:
+            try:
+                conn.execute(text(sql))
+                conn.commit()
+            except Exception:
+                pass  # 이미 존재하면 무시

@@ -59,31 +59,41 @@ def save_simulation():
     user_id = int(get_jwt_identity())
     data = request.get_json(silent=True) or {}
 
-    simulation_id = data.get("simulation_id") or str(uuid.uuid4())
-    name = (data.get("name") or "시뮬레이션").strip()
-    image_id = data.get("image_id")
-    raw_thumbnail = data.get("thumbnail")
-    thumbnail = compress_thumbnail(raw_thumbnail) if raw_thumbnail else None
-    face_parts = data.get("face_parts", [])
-    modifications = data.get("modifications", [])
+    simulation_id   = data.get("simulation_id") or str(uuid.uuid4())
+    name            = (data.get("name") or "시뮬레이션").strip()
+    image_id        = data.get("image_id")
+    aligned_image_id = data.get("aligned_image_id")
+    face_parts      = data.get("face_parts", [])
+    modifications   = data.get("modifications", [])
+
+    # before: FFHQ-aligned 이미지 / after: AI 생성 결과 이미지
+    raw_thumbnail        = data.get("thumbnail")          # before (aligned)
+    raw_result_thumbnail = data.get("result_thumbnail")   # after  (result)
+    thumbnail        = compress_thumbnail(raw_thumbnail)        if raw_thumbnail        else None
+    result_thumbnail = compress_thumbnail(raw_result_thumbnail) if raw_result_thumbnail else None
 
     # Upsert: update if exists, create if not
     sim = Simulation.query.filter_by(id=simulation_id, user_id=user_id).first()
     if sim:
-        sim.name = name
-        sim.thumbnail = thumbnail
-        sim.face_parts_json = json.dumps(face_parts)
+        sim.name             = name
+        sim.thumbnail        = thumbnail
+        sim.result_thumbnail = result_thumbnail
+        sim.face_parts_json  = json.dumps(face_parts)
         sim.modifications_json = json.dumps(modifications)
         if image_id:
             sim.image_id = image_id
+        if aligned_image_id:
+            sim.aligned_image_id = aligned_image_id
     else:
         sim = Simulation(
             id=simulation_id,
             user_id=user_id,
             image_id=image_id,
+            aligned_image_id=aligned_image_id,
             name=name,
             status="completed",
             thumbnail=thumbnail,
+            result_thumbnail=result_thumbnail,
             face_parts_json=json.dumps(face_parts),
             modifications_json=json.dumps(modifications),
         )
